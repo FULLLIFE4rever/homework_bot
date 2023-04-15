@@ -4,6 +4,7 @@ import requests
 from dotenv import load_dotenv
 from os import getenv
 import logging
+from settings import ENDPOINT, HOMEWORK_VERDICTS, RETRY_PERIOD
 
 load_dotenv()
 
@@ -12,35 +13,26 @@ logging.basicConfig(level=logging.DEBUG,
                     filemode='w',
                     format='%(asctime)s [%(levelname)s] %(message)s, %(name)s')
 
+logger = logging.getLogger(__name__)
+logger.addHandler(
+    logging.StreamHandler()
+)
 PRACTICUM_TOKEN = getenv('HEADERS')
 TELEGRAM_TOKEN = getenv('TOKEN')
 TELEGRAM_CHAT_ID = getenv('TELEGRAM_CHAT_ID')
 
-RETRY_PERIOD = 600
-ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
-
-
-HOMEWORK_VERDICTS = {
-    'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
-    'reviewing': 'Работа взята на проверку ревьюером.',
-    'rejected': 'Работа проверена: у ревьюера есть замечания.'
-}
 
 
 def check_tokens():
     """Проверка токенов."""
-    error_status = True
-    if PRACTICUM_TOKEN is None:
-        logging.critical('Отсутствует токен Яндекс.Домашка')
-        error_status = False
-    if TELEGRAM_TOKEN is None:
-        logging.critical('Отсутствует токен Telegram')
-        error_status = False
-    if TELEGRAM_CHAT_ID is None:
-        logging.critical('Отсутствует ID Пользователя Telegram')
-        error_status = False
-    return error_status
+    tokens = {'токен Яндекс.Домашка': PRACTICUM_TOKEN,
+              'токен Telegram': TELEGRAM_TOKEN,
+              'ID пользователя Telegram': TELEGRAM_CHAT_ID}
+    for name, token in tokens.items():
+        if token is None:
+            logger.critical(f'Отсутствует токен {name}')
+            exit()
 
 
 def send_message(bot, message):
@@ -48,50 +40,46 @@ def send_message(bot, message):
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
     except telegram.error.TelegramError as error:
-        logging.error(error)
+        logger.error(error)
     except Exception as error:
-        logging.ERROR(error)
+        logger.error(error)
     else:
-        logging.debug('Письмо успешно отправлено.')
+        logger.debug('Письмо успешно отправлено.')
 
 
 def get_api_answer(timestamp):
     """Получение списка работ."""
     payload = {'from_date': timestamp}
-    answer: dict = {}
     try:
-
         response = requests.get(ENDPOINT,
                                 headers=HEADERS,
                                 params=payload)
         if response.status_code != requests.codes.ok:
-            logging.ERROR('Request не вернул статус 200!')
-        answer = response.json()
+            logger.error('Request не вернул статус 200!')
+            raise KeyError
     except requests.ConnectTimeout as err:
-        logging.ERROR(err)
+        logger.error(err)
     except requests.Timeout as err:
-        logging.ERROR(err)
+        logger.error(err)
     except requests.ConnectionError as err:
-        logging.ERROR(err)
+        logger.error(err)
     except requests.JSONDecodeError as err:
-        logging.ERROR(err)
-
-    return answer
+        logger.error(err)
+    return response.json()
 
 
 def check_response(response):
     """Проверка статуса Домашки."""
-    try:
-        if not isinstance(response, dict):
-            raise TypeError
-        homeworks = response['homeworks']
-        if not isinstance(homeworks, list):
-            raise TypeError
-    except KeyError as error:
-        logging.CRITICAL(response['error'], error)
-    except TypeError as error:
-        logging.CRITICAL(error)
-    return homeworks
+    if not isinstance(response, dict):
+        logger.critical('response[], error')
+        raise TypeError
+    if 'homeworks' not in response.keys():
+        logger.critical("response['error'], error")
+        raise KeyError
+    if not isinstance(response['homeworks'], list):
+        logger.critical("response['error'], error")
+        raise TypeError
+    return response['homeworks']
 
 
 def parse_status(homework):
@@ -101,25 +89,26 @@ def parse_status(homework):
         if homework['status'] in HOMEWORK_VERDICTS:
             verdict = HOMEWORK_VERDICTS[homework['status']]
     except KeyError as err:
-        logging.error(f'Отсутсвует ключ {err}')
+        logger.error(f'Отсутсвует ключ {err}')
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
     """Основная логика работы бота."""
-    if check_tokens():
-        bot = telegram.Bot(token=TELEGRAM_TOKEN)
-        timestamp = int(time.time())
-        while True:
-            try:
-                response = get_api_answer(timestamp=timestamp)
-                checked_response = check_response(response=response)
+    check_tokens()
+    bot = telegram.Bot(token=TELEGRAM_TOKEN)
+    timestamp = int(time.time())
+    while True:
+        try:
+            response = get_api_answer(timestamp=timestamp)
+            checked_response = check_response(response=response)
+            if len(checked_response):
                 message = parse_status(checked_response[0])
                 send_message(bot, message)
-            except Exception as error:
-                message = f'Сбой в работе программы: {error}'
-                send_message(bot, message)
-            time.sleep(600)
+        except Exception as error:
+            message = f'Сбой в работе программы: {error}'
+            send_message(bot, message)
+        time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
